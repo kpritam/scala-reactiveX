@@ -146,45 +146,67 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   }
 
   private def handleInsert(insertQuery: Insert): Unit =
-    conditionalAct(insertQuery, insert, {
-      if (removed) removed = false
-      OperationFinished(insertQuery.id)
-    })
+    compare(
+      op = insertQuery,
+      gt = insert(Right, insertQuery),
+      lt = insert(Left, insertQuery),
+      matched = {
+        if (removed) removed = false
+        sendOperationFinishedMsg(insertQuery)
+      })
+
 
   private def insert(position: Position, insertQuery: Insert): Unit =
-    forwardOrActAndReply(
-      position,
-      insertQuery, {
+    forwardOrAct(
+      pos = position,
+      nonLeaf = _ ! insertQuery,
+      leaf = {
         createChild(position, insertQuery.elem)
-        OperationFinished(insertQuery.id)
+        sendOperationFinishedMsg(insertQuery)
       }
     )
 
   private def handleRemove(removeQuery: Remove): Unit =
-    conditionalAct(removeQuery, remove, {
-      removed = true
-      OperationFinished(removeQuery.id)
-    })
+    compare(
+      op = removeQuery,
+      gt = remove(Right, removeQuery),
+      lt = remove(Left, removeQuery),
+      matched = {
+        removed = true
+        sendOperationFinishedMsg(removeQuery)
+      })
 
   def remove(position: Position, removeQuery: Remove): Unit =
-    forwardOrActAndReply(position, removeQuery, OperationFinished(removeQuery.id))
+    forwardOrAct(
+      pos = position,
+      nonLeaf = _ ! removeQuery,
+      leaf = sendOperationFinishedMsg(removeQuery)
+    )
 
   private def handleContains(containsQuery: Contains): Unit =
-    conditionalAct(containsQuery, contains, ContainsResult(containsQuery.id, result = !removed))
+    compare(
+      op = containsQuery,
+      gt = contains(Right, containsQuery),
+      lt = contains(Left, containsQuery),
+      matched = containsQuery.requester ! ContainsResult(containsQuery.id, result = !removed)
+    )
 
   def contains(position: Position, containsQuery: Contains): Unit =
-    forwardOrActAndReply(position, containsQuery, ContainsResult(containsQuery.id, result = false))
+    forwardOrAct(
+      pos = position,
+      nonLeaf = _ ! containsQuery,
+      leaf = containsQuery.requester ! ContainsResult(containsQuery.id, result = false)
+    )
 
+  private def compare(op: Operation, gt: ⇒ Unit, lt: ⇒ Unit, matched: ⇒ Unit): Unit =
+    if (op.elem > elem) gt
+    else if (op.elem < elem) lt
+    else matched
 
-  private def conditionalAct[T <: Operation](operation: T, action: (Position, T) ⇒ Unit, reply: ⇒ OperationReply): Unit =
-    if (operation.elem > elem) action(Right, operation)
-    else if (operation.elem < elem) action(Left, operation)
-    else operation.requester ! reply
-
-  private def forwardOrActAndReply(position: Position, operation: Operation, actAndReply: ⇒ OperationReply): Unit =
-    subtrees.get(position) match {
-      case Some(ref) ⇒ ref ! operation
-      case None ⇒ operation.requester ! actAndReply
+  private def forwardOrAct(pos: Position, nonLeaf: ActorRef ⇒ Unit, leaf: ⇒ Unit): Unit =
+    subtrees.get(pos) match {
+      case Some(ref) ⇒ nonLeaf(ref)
+      case None ⇒ leaf
     }
 
   private def createChild(position: Position, elm: Int): Unit = {
@@ -192,6 +214,7 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
     subtrees += (position → ref)
   }
 
+  private def sendOperationFinishedMsg(op: Operation): Unit = op.requester ! OperationFinished(op.id)
   private def sendCopyFinishedToParentAndStop(): Unit = {
     context.parent ! CopyFinished
     context.stop(self)
