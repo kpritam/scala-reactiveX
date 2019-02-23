@@ -114,7 +114,10 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     cancellables.get(cancellableKey).foreach {
       case (replyTo, _) ⇒
         operationReply(persistenceStatus, key, id, OperationAck(id)) match {
-          case Some(op) ⇒ replyTo ! op; replicationStatus = replicationStatus - ((key, id))
+          case Some(op) ⇒
+            timers.cancel(key + id)
+            replyTo ! op
+            replicationStatus = replicationStatus - ((key, id))
           case None ⇒ replicationStatus = replicationStatus.updated((key, id), true)
         }
     }
@@ -168,7 +171,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
 
   private def replicate: UpdateRequest ⇒ UpdateRequest = updateRequest ⇒ {
     import updateRequest._
-    if(replicators.nonEmpty) {
+    if (replicators.nonEmpty) {
       replicationStatus = replicationStatus.updated((key, id), false)
       val replicationTracker = context.actorOf(ReplicationTracker.props(key, id, replicators), s"tracker-$id")
 
