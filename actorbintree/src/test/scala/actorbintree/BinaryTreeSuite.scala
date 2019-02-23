@@ -1,18 +1,17 @@
 /**
- * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
- */
+  * Copyright (C) 2009-2015 Typesafe Inc. <http://www.typesafe.com>
+  */
 package actorbintree
 
-import akka.actor.{ Props, ActorRef, ActorSystem }
-import org.scalatest.{ BeforeAndAfterAll, FlatSpec }
-import akka.testkit.{ TestProbe, ImplicitSender, TestKit }
+import akka.actor.{Props, ActorRef, ActorSystem}
+import org.scalatest.{BeforeAndAfterAll, FlatSpec}
+import akka.testkit.{TestProbe, ImplicitSender, TestKit}
 import org.scalatest.Matchers
 import scala.util.Random
 import scala.concurrent.duration._
 import org.scalatest.FunSuiteLike
 
-class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSuiteLike with Matchers with BeforeAndAfterAll with ImplicitSender
-{
+class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSuiteLike with Matchers with BeforeAndAfterAll with ImplicitSender {
 
   def this() = this(ActorSystem("BinaryTreeSuite"))
 
@@ -29,7 +28,7 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
         requester.expectMsgType[OperationReply]
       } catch {
         case ex: Throwable if ops.size > 10 => fail(s"failure to receive confirmation $i/${ops.size}", ex)
-        case ex: Throwable                  => fail(s"failure to receive confirmation $i/${ops.size}\nRequests:" + ops.mkString("\n    ", "\n     ", ""), ex)
+        case ex: Throwable => fail(s"failure to receive confirmation $i/${ops.size}\nRequests:" + ops.mkString("\n    ", "\n     ", ""), ex)
       }
       val replies = repliesUnsorted.sortBy(_.id)
       if (replies != expectedReplies) {
@@ -67,30 +66,66 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
     val requester = TestProbe()
     val requesterRef = requester.ref
     val ops = List(
-      Insert(requesterRef, id=100, 1),
-      Contains(requesterRef, id=50, 2),
-      Remove(requesterRef, id=10, 1),
-      Insert(requesterRef, id=20, 2),
-      Contains(requesterRef, id=80, 1),
-      Contains(requesterRef, id=70, 2)
-      )
+      Insert(requesterRef, id = 100, 1),
+      Contains(requesterRef, id = 50, 2),
+      Remove(requesterRef, id = 10, 1),
+      Insert(requesterRef, id = 20, 2),
+      Contains(requesterRef, id = 80, 1),
+      Contains(requesterRef, id = 70, 2)
+    )
 
     val expectedReplies = List(
-      OperationFinished(id=10),
-      OperationFinished(id=20),
-      ContainsResult(id=50, false),
-      ContainsResult(id=70, true),
-      ContainsResult(id=80, false),
-      OperationFinished(id=100)
-      )
+      OperationFinished(id = 10),
+      OperationFinished(id = 20),
+      ContainsResult(id = 50, false),
+      ContainsResult(id = 70, true),
+      ContainsResult(id = 80, false),
+      OperationFinished(id = 100)
+    )
 
     verify(requester, ops, expectedReplies)
   }
 
+  test("test insertion for deleted element") {
+    val topNode = system.actorOf(Props[BinaryTreeSet])
+
+    topNode ! Insert(testActor, id = 1, 5)
+    topNode ! Remove(testActor, id = 2, 5)
+    topNode ! Insert(testActor, id = 3, 5)
+    expectMsg(OperationFinished(1))
+    expectMsg(OperationFinished(2))
+    expectMsg(OperationFinished(3))
+
+    topNode ! Contains(testActor, id = 4, 5)
+    expectMsg(ContainsResult(id = 4, result = true))
+  }
+
+  test("test that messages received while performing GC gets processed once GC is finished") {
+    val topNode = system.actorOf(Props[BinaryTreeSet])
+
+    topNode ! Insert(testActor, id = 1, 5)
+    topNode ! Insert(testActor, id = 2, 3)
+    topNode ! Insert(testActor, id = 3, 7)
+    topNode ! Remove(testActor, id = 4, 3)
+    topNode ! GC
+    topNode ! Insert(testActor, id = 5, 18)
+    topNode ! Insert(testActor, id = 6, 11)
+
+    expectMsg(OperationFinished(1))
+    expectMsg(OperationFinished(2))
+    expectMsg(OperationFinished(3))
+    expectMsg(OperationFinished(4))
+    expectMsg(OperationFinished(5))
+    expectMsg(OperationFinished(6))
+    ()
+  }
+
   test("behave identically to built-in set (includes GC)") {
     val rnd = new Random()
+
     def randomOperations(requester: ActorRef, count: Int): Seq[Operation] = {
       def randomElement: Int = rnd.nextInt(100)
+
       def randomOperation(requester: ActorRef, id: Int): Operation = rnd.nextInt(4) match {
         case 0 => Insert(requester, id, randomElement)
         case 1 => Insert(requester, id, randomElement)
@@ -103,6 +138,7 @@ class BinaryTreeSuite(_system: ActorSystem) extends TestKit(_system) with FunSui
 
     def referenceReplies(operations: Seq[Operation]): Seq[OperationReply] = {
       var referenceSet = Set.empty[Int]
+
       def replyFor(op: Operation): OperationReply = op match {
         case Insert(_, seq, elem) =>
           referenceSet = referenceSet + elem

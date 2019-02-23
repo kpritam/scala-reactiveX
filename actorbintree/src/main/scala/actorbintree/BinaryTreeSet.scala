@@ -6,7 +6,6 @@ package actorbintree
 import actorbintree.BinaryTreeNode.{CopyFinished, CopyTo}
 import akka.actor._
 
-import scala.collection.immutable.Queue
 import scala.util.Random
 
 object BinaryTreeSet {
@@ -54,7 +53,7 @@ object BinaryTreeSet {
 
 }
 
-class BinaryTreeSet extends Actor {
+class BinaryTreeSet extends Actor with Stash {
 
   import BinaryTreeSet._
 
@@ -62,27 +61,18 @@ class BinaryTreeSet extends Actor {
 
   var root: ActorRef = createRoot
 
-  // optional
-  var pendingQueue: Queue[Operation] = Queue.empty[Operation]
-
-  // optional
-  def receive: Receive = normal
-
-  // optional
-  /** Accepts `Operation` and `GC` messages. */
-  val normal: Receive = {
+  def receive: Receive = {
     case GC ⇒ startGC()
     case msg: Operation ⇒ root ! msg
     case msg ⇒ println(s"Unknown message : [$msg] received.")
   }
 
-  // optional
   /** Handles messages while garbage collection is performed.
     * `newRoot` is the root of the new binary tree where we want to copy
     * all non-removed elements into.
     */
   def garbageCollecting(newRoot: ActorRef): Receive = {
-    case msg: Operation ⇒ pendingQueue = pendingQueue :+ msg
+    case _: Operation ⇒ stash()
     case CopyFinished ⇒ finishedGC(newRoot)
     case GC ⇒ // ignore
   }
@@ -95,9 +85,8 @@ class BinaryTreeSet extends Actor {
 
   private def finishedGC(newRoot: ActorRef): Unit = {
     root = newRoot
-    pendingQueue.foreach(root ! _)
-    pendingQueue = Queue.empty[Operation]
-    context.become(normal)
+    context.unbecome()
+    unstashAll()
   }
 
 }
@@ -215,6 +204,7 @@ class BinaryTreeNode(val elem: Int, initiallyRemoved: Boolean) extends Actor {
   }
 
   private def sendOperationFinishedMsg(op: Operation): Unit = op.requester ! OperationFinished(op.id)
+
   private def sendCopyFinishedToParentAndStop(): Unit = {
     context.parent ! CopyFinished
     context.stop(self)
