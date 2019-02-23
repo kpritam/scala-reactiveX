@@ -1,8 +1,9 @@
 package kvstore
 
-import akka.actor.{Actor, ActorRef, Cancellable, Props, Scheduler, Terminated, Timers}
+import akka.actor.{Actor, ActorRef, Cancellable, PoisonPill, Props, Scheduler, Terminated, Timers}
 import akka.util.Timeout
 import kvstore.Arbiter._
+import kvstore.ReplicationTracker.ReplicationFinished
 
 import scala.concurrent.duration._
 import scala.util.Random
@@ -53,6 +54,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   val scheduler: Scheduler = context.system.scheduler
   var cancellables = Map.empty[String, (ActorRef, Cancellable)]
 
+  var persistenceStatus = Map.empty[(String, Long), Boolean]
+  var replicationStatus = Map.empty[(String, Long), Boolean]
+
   case class StopPersistRetries(key: String, id: Long)
 
   implicit val timeout: Timeout = Timeout(1.seconds)
@@ -65,8 +69,12 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   }
 
   val leader: Receive = {
-    case Insert(key, value, id) ⇒ (updateLocalStore andThen persistWithRetry) (UpdateRequest(key, Some(value), id))
-    case Remove(key, id) ⇒ (updateLocalStore andThen persistWithRetry) (UpdateRequest(key, None, id))
+    case Insert(key, value, id) ⇒
+      persistenceStatus = persistenceStatus.updated((key, id), false)
+      (updateLocalStore andThen replicate andThen persistWithRetry) (UpdateRequest(key, Some(value), id))
+    case Remove(key, id) ⇒
+      persistenceStatus = persistenceStatus.updated((key, id), false)
+      (updateLocalStore andThen replicate andThen persistWithRetry) (UpdateRequest(key, None, id))
     case Get(key, id) ⇒ handleGet(key, id)
     case Replicas(replicas) ⇒
       replicaToReplicatorMap = buildReplicasToReplicatorMap(replicas)
@@ -74,6 +82,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case Persisted(key, id) ⇒ handlePersisted(key, id, OperationAck(id))
     case StopPersistRetries(key, id) ⇒ handleStopPersistRetries(key, id, Some(OperationFailed(id)))
     case Terminated(ref) ⇒ replicaToReplicatorMap.get(ref).foreach(context.stop)
+    case ReplicationFinished(key, id) ⇒ handleReplicationFinished(key, id)
     case _ ⇒
   }
 
@@ -89,14 +98,39 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     val cancellableKey = key + id
     cancellables.get(cancellableKey).foreach {
       case (replyTo, cancellable) ⇒
-        replyTo ! msg
         cancellable.cancel()
-        cancellables = cancellables - cancellableKey
+        operationReply(replicationStatus, key, id, msg) match {
+          case Some(op) ⇒
+            replyTo ! op
+            cancellables = cancellables - cancellableKey
+            persistenceStatus = persistenceStatus - ((key, id))
+          case None ⇒ persistenceStatus = persistenceStatus.updated((key, id), true)
+        }
     }
   }
 
+  private def handleReplicationFinished(key: String, id: Long): Unit = {
+    val cancellableKey = key + id
+    cancellables.get(cancellableKey).foreach {
+      case (replyTo, _) ⇒
+        operationReply(persistenceStatus, key, id, OperationAck(id)) match {
+          case Some(op) ⇒ replyTo ! op; replicationStatus = replicationStatus - ((key, id))
+          case None ⇒ replicationStatus = replicationStatus.updated((key, id), true)
+        }
+    }
+  }
+
+  private def operationReply(map: Map[(String, Long), Boolean], key: String, id: Long, msg: Any): Option[Any] =
+    map.get((key, id)) match {
+      case Some(true) ⇒ Some(msg)
+      case Some(false) ⇒ None
+      case _ ⇒ Some(msg)
+    }
+
   private def handleStopPersistRetries(key: String, id: Long, msgOpt: Option[Any]): Unit = {
     val cancellableKey = key + id
+    persistenceStatus = persistenceStatus - ((key, id))
+    replicationStatus = replicationStatus - ((key, id))
     cancellables.get(cancellableKey).foreach {
       case (replyTo, cancellable) ⇒
         msgOpt.foreach(msg ⇒ replyTo ! msg)
@@ -132,11 +166,26 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     updateRequest
   }
 
+  private def replicate: UpdateRequest ⇒ UpdateRequest = updateRequest ⇒ {
+    import updateRequest._
+    if(replicators.nonEmpty) {
+      replicationStatus = replicationStatus.updated((key, id), false)
+      val replicationTracker = context.actorOf(ReplicationTracker.props(key, id, replicators), s"tracker-$id")
+
+      replicators.foreach(_.tell(Replicate(key, value, id), replicationTracker))
+      scheduler.scheduleOnce(1.seconds, replicationTracker, PoisonPill)
+    }
+    updateRequest
+  }
+
   private def buildReplicasToReplicatorMap(replicas: Set[SecondaryReplica]): Map[SecondaryReplica, Replicator] =
-    replicas.map { replica ⇒
+    replicas.filterNot(_.compareTo(self) == 0).map { replica ⇒
       replicaToReplicatorMap.get(replica) match {
         case Some(replicator) ⇒ replica → replicator
-        case None ⇒ replica → (createReplicator andThen replicateKV) (replica)
+        case None ⇒
+          val replicator = (createReplicator andThen replicateKV) (replica)
+          replicators = replicators + replicator
+          replica → replicator
       }
     }.toMap
 
