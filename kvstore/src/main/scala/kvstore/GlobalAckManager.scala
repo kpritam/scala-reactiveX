@@ -4,7 +4,7 @@ import akka.actor.{Actor, ActorRef, Props, Scheduler, Timers}
 import kvstore.Persistence.{Persist, Persisted}
 import kvstore.PersistenceManager.PersistSuccess
 import kvstore.Replica.{ReplicatorsTerminated, UpdateRequest}
-import kvstore.ReplicationManager.{ReplicationSuccess, Replicators}
+import kvstore.ReplicationManager.ReplicationSuccess
 import kvstore.Replicator.Replicated
 
 import scala.concurrent.ExecutionContextExecutor

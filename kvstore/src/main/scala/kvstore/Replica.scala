@@ -1,13 +1,13 @@
 package kvstore
 
-import akka.actor.{Actor, ActorRef, Cancellable, Props, Scheduler, Timers}
+import akka.actor.{Actor, ActorRef, Cancellable, Props, Scheduler, Terminated, Timers}
 import akka.util.Timeout
 import kvstore.Arbiter._
 import kvstore.GlobalAckManager.GlobalAck
 import kvstore.Persistence.Persist
+import kvstore.stores.{KVStore, ReplicaStore}
 
 import scala.concurrent.duration._
-import scala.util.Random
 
 object Replica {
 
@@ -48,7 +48,7 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   type SecondaryReplica = ActorRef
   type Replicator = ActorRef
 
-  var kv = Map.empty[String, String]
+  val kvStore: KVStore = new KVStore()
   val replicaStore = new ReplicaStore(context)
   //  import replicaStore._
 
@@ -81,14 +81,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case Replicas(replicas) ⇒
       val removedReplicators = replicaStore.add(replicas)
       self ! ReplicatorsTerminated(removedReplicators)
-      replicateKV(replicaStore.replicators)
+      kvStore.replicate(replicaStore.replicators)
     case replicated@Replicated(key, id) ⇒ globalAcks.get((key, id)).foreach(_ forward replicated)
     case GlobalAck(key, id, replyTo, globalAck) ⇒
       globalAcks = globalAcks - ((key, id))
       if (globalAck) replyTo ! OperationAck(id)
       else replyTo ! OperationFailed(id)
     case replicatorsTerminated: ReplicatorsTerminated ⇒ globalAcks.values.foreach(_ ! replicatorsTerminated)
-//    case Terminated(replica) ⇒ handleReplicatorsTerminated(replica)
+    case Terminated(replica) ⇒
+      val replicators = replicaStore.remove(Set(replica))
+      self ! ReplicatorsTerminated(replicators)
     case _ ⇒
   }
 
@@ -106,49 +108,27 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     import updateRequest._
     val request = UpdateRequest(key, value, id)
     val ackMgr = createGlobalAckManager(request)
-    updateLocalStore(key, value)
+    kvStore.update(key, value)
     replicate(key, value, id)
     persistenceActor.tell(Persist(key, value, id), ackMgr)
   }
 
   private def handleSnapshot(key: String, value: Option[String], snapshotSeq: Long): Unit = {
-    snapshotSeq match {
-      case ValidSnapshot() ⇒
-        val ref = createGlobalAckManager(UpdateRequest(key, value, snapshotSeq, onlyPersist = true))
-        lastSnapshotSeq = snapshotSeq
-        updateLocalStore(key, value)
-        ref ! Persist(key, value, snapshotSeq)
-      case OldOrDuplicateSnapshot() ⇒ sender ! SnapshotAck(key, snapshotSeq)
-      case _ ⇒ // ignore invalid snapshots
-    }
-  }
+    def isOldOrDuplicateSnapshot = snapshotSeq <= lastSnapshotSeq
 
-  object ValidSnapshot {
-    def unapply(seq: Long): Boolean = seq == (lastSnapshotSeq + 1)
-  }
+    def isValidSnapshot = snapshotSeq == lastSnapshotSeq + 1
 
-  object OldOrDuplicateSnapshot {
-    def unapply(seq: Long): Boolean = seq <= lastSnapshotSeq
+    if (isValidSnapshot) {
+      val ref = createGlobalAckManager(UpdateRequest(key, value, snapshotSeq, onlyPersist = true))
+      lastSnapshotSeq = snapshotSeq
+      kvStore.update(key, value)
+      ref ! Persist(key, value, snapshotSeq)
+    } else if (isOldOrDuplicateSnapshot) sender ! SnapshotAck(key, snapshotSeq)
   }
-
-  private def updateLocalStore(key: String, value: Option[String]): Unit =
-    value match {
-      case Some(value) ⇒ kv = kv.updated(key, value)
-      case None ⇒ kv = kv - key
-    }
 
   private def replicate(key: String, value: Option[String], id: Long): Unit =
     replicaStore.replicators.foreach(_ ! Replicate(key, value, id))
 
-  // fixme
-  private def replicateKV(replicators: Set[Replicator]): Unit =
-    replicators.foreach { replicator ⇒
-      kv.foreach {
-        case (k, v) ⇒ replicator ! Replicate(k, Some(v), Random.nextLong())
-      }
-    }
-
-  private def handleGet(key: String, id: Long): Unit = sender() ! GetResult(key, kv.get(key), id)
-
+  private def handleGet(key: String, id: Long): Unit = sender() ! GetResult(key, kvStore.get(key), id)
 }
 

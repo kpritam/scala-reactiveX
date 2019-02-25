@@ -44,5 +44,4 @@ class ReplicationManager(val key: String, val id: Long, replicators: Set[ActorRe
       context.stop(self)
     }
 
-
 }

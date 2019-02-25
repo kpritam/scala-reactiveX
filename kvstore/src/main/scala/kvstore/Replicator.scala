@@ -20,7 +20,6 @@ object Replicator {
 class Replicator(val replica: ActorRef) extends Actor {
 
   import Replicator._
-  import Replica._
   import context.dispatcher
 
   /*

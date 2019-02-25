@@ -1,8 +1,8 @@
 package kvstore
 
-import akka.actor.{Props, Actor}
+import akka.actor.{Actor, Props}
+
 import scala.util.Random
-import java.util.concurrent.atomic.AtomicInteger
 
 object Persistence {
 
