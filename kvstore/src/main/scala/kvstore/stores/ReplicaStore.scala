@@ -23,7 +23,7 @@ class ReplicaStore(context: ActorContext) {
 
     // create replicators for new replicas
     _replicaToReplicatorMap = _replicaToReplicatorMap ++ newReplicas.map { replica ⇒
-      val replicator = context.actorOf(Replicator.props(replica), s"replicator-${replica.path.name}")
+      val replicator = context.actorOf(Replicator.props(replica))
       _replicators = _replicators + replicator
       replica → replicator
     }.toMap

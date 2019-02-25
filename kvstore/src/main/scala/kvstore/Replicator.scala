@@ -22,10 +22,6 @@ class Replicator(val replica: ActorRef) extends Actor {
   import Replicator._
   import context.dispatcher
 
-  /*
-   * The contents of this actor is just a suggestion, you can implement it in any way you like.
-   */
-
   type PrimaryReplica = ActorRef
 
   // map from sequence number to pair of sender and request
