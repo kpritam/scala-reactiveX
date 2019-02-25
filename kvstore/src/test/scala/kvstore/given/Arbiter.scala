@@ -13,7 +13,7 @@ class Arbiter(lossy: Boolean, audit: ActorRef) extends Actor {
   var leader: Option[ActorRef] = None
   var replicas = Set.empty[ActorRef]
 
-  def receive = {
+  def receive: Receive = {
     case Join =>
       if (leader.isEmpty) {
         leader = Some(sender)
@@ -33,7 +33,7 @@ class Arbiter(lossy: Boolean, audit: ActorRef) extends Actor {
 class LossyTransport(target: ActorRef) extends Actor {
   val rnd = new Random
   var dropped = 0
-  def receive = {
+  def receive: Receive = {
     case msg =>
       if (dropped > 2 || rnd.nextFloat < 0.9) {
         dropped = 0

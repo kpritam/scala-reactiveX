@@ -8,7 +8,7 @@ import scala.util.Random
 import java.util.concurrent.atomic.AtomicInteger
 
 object Persistence {
-  def props(flaky: Boolean): Props = Props(classOf[Persistence], flaky)
+  def props(flaky: Boolean): Props = Props(new Persistence(flaky))
 }
 
 class Persistence(flaky: Boolean) extends Actor {
@@ -17,7 +17,7 @@ class Persistence(flaky: Boolean) extends Actor {
   private def newFailCount: Int = if (flaky) Random.nextInt(4) else 0
   var failSteps: Int = newFailCount
 
-  def receive = {
+  def receive: Receive = {
     case Persist(key, value, id) =>
       if (failSteps == 0) {
         sender ! Persisted(key, id)

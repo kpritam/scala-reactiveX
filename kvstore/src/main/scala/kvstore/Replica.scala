@@ -1,6 +1,6 @@
 package kvstore
 
-import akka.actor.{Actor, ActorRef, Cancellable, Props, Scheduler, Terminated, Timers}
+import akka.actor.{Actor, ActorRef, Cancellable, Props, Scheduler, Timers}
 import akka.util.Timeout
 import kvstore.Arbiter._
 import kvstore.GlobalAckManager.GlobalAck
@@ -33,6 +33,10 @@ object Replica {
 
   case class UpdateRequest(key: String, value: Option[String], id: Long, onlyPersist: Boolean = false)
 
+  case class ReplicaTerminated(replica: ActorRef)
+
+  case class ReplicatorsTerminated(replicators: Set[ActorRef])
+
   def props(arbiter: ActorRef, persistenceProps: Props): Props = Props(new Replica(arbiter, persistenceProps))
 }
 
@@ -45,18 +49,15 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   type Replicator = ActorRef
 
   var kv = Map.empty[String, String]
-  // a map from secondary replicas to replicators
-  var replicaToReplicatorMap = Map.empty[SecondaryReplica, Replicator]
-  // the current set of replicators
-  var replicators = Set.empty[Replicator]
+  val replicaStore = new ReplicaStore(context)
+  //  import replicaStore._
+
   var lastSnapshotSeq: Long = -1L
 
   val persistenceActor: ActorRef = context.actorOf(persistenceProps, "persistence-actor")
   val scheduler: Scheduler = context.system.scheduler
   var cancellables = Map.empty[String, (ActorRef, Cancellable)]
-  var prManagers = Map.empty[(String, Long), ActorRef]
-
-  case class StopPersistRetries(key: String, id: Long)
+  var globalAcks = Map.empty[(String, Long), ActorRef]
 
   implicit val timeout: Timeout = Timeout(1.seconds)
 
@@ -67,9 +68,9 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case JoinedSecondary ⇒ context.become(replica)
   }
 
-  def createPRManager(updateRequest: UpdateRequest): ActorRef = {
-    val ref = context.actorOf(GlobalAckManager.props(updateRequest, sender(), persistenceActor, replicators.size))
-    prManagers = prManagers.updated((updateRequest.key, updateRequest.id), ref)
+  def createGlobalAckManager(updateRequest: UpdateRequest): ActorRef = {
+    val ref = context.actorOf(GlobalAckManager.props(updateRequest, sender(), persistenceActor, replicaStore.replicators))
+    globalAcks = globalAcks.updated((updateRequest.key, updateRequest.id), ref)
     ref
   }
 
@@ -78,22 +79,25 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     case Remove(key, id) ⇒ update(UpdateRequest(key, None, id))
     case Get(key, id) ⇒ handleGet(key, id)
     case Replicas(replicas) ⇒
-      replicaToReplicatorMap = buildReplicasToReplicatorMap(replicas)
-      replicas.foreach(context.watch)
-    case replicated@Replicated(key, id) ⇒ prManagers.get((key, id)).foreach(_ ! replicated)
+      val removedReplicators = replicaStore.add(replicas)
+      self ! ReplicatorsTerminated(removedReplicators)
+      replicateKV(replicaStore.replicators)
+    case replicated@Replicated(key, id) ⇒ globalAcks.get((key, id)).foreach(_ forward replicated)
     case GlobalAck(key, id, replyTo, globalAck) ⇒
-      prManagers = prManagers - ((key, id))
+      globalAcks = globalAcks - ((key, id))
       if (globalAck) replyTo ! OperationAck(id)
       else replyTo ! OperationFailed(id)
-    case Terminated(ref) ⇒ replicaToReplicatorMap.get(ref).foreach(context.stop)
+    case replicatorsTerminated: ReplicatorsTerminated ⇒ globalAcks.values.foreach(_ ! replicatorsTerminated)
+//    case Terminated(replica) ⇒ handleReplicatorsTerminated(replica)
     case _ ⇒
   }
+
 
   val replica: Receive = {
     case Get(key, id) ⇒ handleGet(key, id)
     case Snapshot(key, value, seq) ⇒ handleSnapshot(key, value, seq)
     case GlobalAck(key, id, replyTo, globalAck) ⇒
-      prManagers = prManagers - ((key, id))
+      globalAcks = globalAcks - ((key, id))
       if (globalAck) replyTo ! SnapshotAck(key, id)
     case _ ⇒
   }
@@ -101,16 +105,16 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
   private def update(updateRequest: UpdateRequest): Unit = {
     import updateRequest._
     val request = UpdateRequest(key, value, id)
-    val prMgr = createPRManager(request)
+    val ackMgr = createGlobalAckManager(request)
     updateLocalStore(key, value)
     replicate(key, value, id)
-    persistenceActor.tell(Persist(key, value, id), prMgr)
+    persistenceActor.tell(Persist(key, value, id), ackMgr)
   }
 
   private def handleSnapshot(key: String, value: Option[String], snapshotSeq: Long): Unit = {
     snapshotSeq match {
       case ValidSnapshot() ⇒
-        val ref = createPRManager(UpdateRequest(key, value, snapshotSeq, onlyPersist = true))
+        val ref = createGlobalAckManager(UpdateRequest(key, value, snapshotSeq, onlyPersist = true))
         lastSnapshotSeq = snapshotSeq
         updateLocalStore(key, value)
         ref ! Persist(key, value, snapshotSeq)
@@ -134,40 +138,15 @@ class Replica(val arbiter: ActorRef, persistenceProps: Props) extends Actor with
     }
 
   private def replicate(key: String, value: Option[String], id: Long): Unit =
-    replicators.foreach(_ ! Replicate(key, value, id))
-
-  private def buildReplicasToReplicatorMap(replicas: Set[SecondaryReplica]): Map[SecondaryReplica, Replicator] = {
-    replicaToReplicatorMap = replicaToReplicatorMap.filter {
-      case (replica, replicator) ⇒
-        if (replicas.contains(replica)) true
-        else {
-          context.stop(replicator)
-          false
-        }
-    }
-
-    replicas.filterNot(_.compareTo(self) == 0).map { replica ⇒
-      replicaToReplicatorMap.get(replica) match {
-        case Some(replicator) ⇒ replica → replicator
-        case None ⇒
-          val replicator = (createReplicator andThen replicateKV) (replica)
-          replicators = replicators + replicator
-          replica → replicator
-      }
-    }.toMap
-  }
-
-  private def createReplicator: SecondaryReplica ⇒ Replicator = replica ⇒ {
-    context.actorOf(Replicator.props(replica))
-  }
+    replicaStore.replicators.foreach(_ ! Replicate(key, value, id))
 
   // fixme
-  private def replicateKV: Replicator ⇒ Replicator = replicator ⇒ {
-    kv.foreach {
-      case (k, v) ⇒ replicator ! Replicate(k, Some(v), Random.nextLong())
+  private def replicateKV(replicators: Set[Replicator]): Unit =
+    replicators.foreach { replicator ⇒
+      kv.foreach {
+        case (k, v) ⇒ replicator ! Replicate(k, Some(v), Random.nextLong())
+      }
     }
-    replicator
-  }
 
   private def handleGet(key: String, id: Long): Unit = sender() ! GetResult(key, kv.get(key), id)
 
