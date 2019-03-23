@@ -18,48 +18,31 @@ object SelectiveReceive {
     */
   def apply[T](bufferSize: Int, initialBehavior: Behavior[T]): Behavior[T] = Behaviors.setup { ctx ⇒
     val buffer = StashBuffer[T](bufferSize)
-    var currentUncanonical = initialBehavior
-    var current = Behavior.validateAsInitial(Behavior.start(initialBehavior, ctx))
 
-    new ExtensibleBehavior[T] {
-      override def receive(ctx: ActorContext[T], msg: T): Behavior[T] = {
-        println(s"Processing $msg")
-        currentUncanonical = Behavior.interpretMessage(current, ctx, msg)
-        current = Behavior.canonicalize(currentUncanonical, current, ctx)
-        if (Behavior.isUnhandled(currentUncanonical)) {
+    def interpret(behavior: Behavior[T], msg: T): (Behavior[T], Boolean) = {
+      val started = Behavior.validateAsInitial(Behavior.start(behavior, ctx))
+      val interpreted = Behavior.interpretMessage(started, ctx, msg)
+      (Behavior.canonicalize(interpreted, started, ctx), Behavior.isUnhandled(interpreted))
+    }
+
+    def beh(current: Behavior[T]): ExtensibleBehavior[T] = new ExtensibleBehavior[T] {
+      override def receive(_ctx: ActorContext[T], msg: T): Behavior[T] = {
+        val (canonical, unHandled) = interpret(current, msg)
+        if (unHandled) {
           println(s"Stashing $msg")
           buffer.stash(msg)
+          beh(canonical)
         }
-        else if(buffer.nonEmpty) {
-          println("Unstashing ..")
-          buffer.foreach(x ⇒ print(s"$x, "))
-          println()
-          buffer.unstashAll(ctx.asInstanceOf[scaladsl.ActorContext[T]], this)
-        }
-        this
+        else buffer.unstashAll(ctx, beh(canonical))
       }
 
       override def receiveSignal(ctx: ActorContext[T], msg: Signal): Behavior[T] = {
         println(s"Processing signal $msg")
-        Behavior.interpretSignal(current, ctx, msg)
+        beh(Behavior.interpretSignal(current, ctx, msg))
       }
     }
-    //    new SelectiveRec[T](buffer, Behavior.validateAsInitial(Behavior.start(initialBehavior, ctx)))
-  }
 
-  /*
-  class SelectiveRec[T](stashBuffer: StashBuffer[T], initialBeh: Behavior[T]) extends ExtensibleBehavior[T] {
-    override def receive(ctx: ActorContext[T], msg: T): Behavior[T] = {
-      val currentUncanonical = Behavior.interpretMessage(initialBeh, ctx, msg)
-      val current = Behavior.canonicalize(currentUncanonical, initialBeh, ctx)
-      if (Behavior.isUnhandled(currentUncanonical)) stashBuffer.stash(msg)
-      else stashBuffer.unstashAll(ctx.asInstanceOf[scaladsl.ActorContext[T]], this)
-      new SelectiveRec[T](stashBuffer, current)
-    }
-
-    override def receiveSignal(ctx: ActorContext[T], msg: Signal): Behavior[T] =
-      Behavior.interpretSignal(this, ctx, msg)
+    beh(initialBehavior)
   }
-*/
 
 }
