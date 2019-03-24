@@ -71,8 +71,6 @@ object Transactor {
         .receiveSignal {
           case (_, Terminated(ref)) ⇒
             idle(value, sessionTimeout)
-          case (_, PostStop) =>
-            Behaviors.same
         }
     }
 
@@ -90,11 +88,9 @@ object Transactor {
       ctx.setReceiveTimeout(sessionTimeout, RolledBack(sessionRef))
       Behaviors.receiveMessage {
         case Committed(session, value) ⇒
-          ctx.cancelReceiveTimeout()
           if (session eq sessionRef) idle(value, sessionTimeout)
           else Behavior.ignore
         case RolledBack(session) ⇒
-          ctx.cancelReceiveTimeout()
           if (session eq sessionRef) idle(rollbackValue, sessionTimeout)
           else Behavior.ignore
         case _: Begin[T] ⇒ Behavior.unhandled
@@ -137,7 +133,6 @@ object Transactor {
           commit ! Committed(ctx.self, currentValue)
           Behaviors.stopped
         case Rollback() ⇒
-          commit.upcast ! RolledBack(ctx.self)
           Behaviors.stopped
       }
     }
