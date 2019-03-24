@@ -1,7 +1,7 @@
 package protocols
 
+import akka.actor.typed._
 import akka.actor.typed.scaladsl._
-import akka.actor.typed.{PostStop, _}
 
 import scala.concurrent.duration._
 import scala.util.{Failure, Success, Try}
@@ -68,10 +68,6 @@ object Transactor {
           inSession(value, sessionTimeout, session)
         case _: Committed[T] | _: RolledBack[T] ⇒ Behavior.ignore
       }
-        .receiveSignal {
-          case (_, Terminated(ref)) ⇒
-            idle(value, sessionTimeout)
-        }
     }
 
   /**
@@ -86,15 +82,23 @@ object Transactor {
   private def inSession[T](rollbackValue: T, sessionTimeout: FiniteDuration, sessionRef: ActorRef[Session[T]]): Behavior[PrivateCommand[T]] =
     Behaviors.setup { ctx ⇒
       ctx.setReceiveTimeout(sessionTimeout, RolledBack(sessionRef))
-      Behaviors.receiveMessage {
+      Behaviors.receiveMessage[PrivateCommand[T]] {
         case Committed(session, value) ⇒
           if (session eq sessionRef) idle(value, sessionTimeout)
           else Behavior.ignore
         case RolledBack(session) ⇒
-          if (session eq sessionRef) idle(rollbackValue, sessionTimeout)
+          if (session eq sessionRef) {
+            ctx.stop(session)
+            idle(rollbackValue, sessionTimeout)
+          }
           else Behavior.ignore
         case _: Begin[T] ⇒ Behavior.unhandled
       }
+        .receiveSignal {
+          case (_, Terminated(ref)) ⇒
+            if (ref eq sessionRef) idle(rollbackValue, sessionTimeout)
+            else Behaviors.stopped
+        }
     }
 
   /**
