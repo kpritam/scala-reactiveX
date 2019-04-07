@@ -14,7 +14,6 @@ import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.time.{Millis, Span}
 import org.scalatest.{BeforeAndAfterAll, FunSuiteLike}
 
-import scala.collection.immutable.SortedSet
 import scala.concurrent.duration.DurationInt
 import scala.concurrent.{Await, Future}
 

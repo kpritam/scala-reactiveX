@@ -138,18 +138,12 @@ object Server {
     */
   def isNotified(userId: Int)(eventAndFollowers: (Event, Followers)): Boolean =
     eventAndFollowers match {
-      case (_: Event.Broadcast, _) ⇒ true
+      case (Event.Follow(_, _, to), _) ⇒ to == userId
       case (Event.PrivateMsg(_, _, to), _) ⇒ to == userId
       case (Event.StatusUpdate(_, from), followers) ⇒ followers.get(userId).exists(_.contains(from))
+      case (_: Event.Broadcast, _) ⇒ true
       case _ ⇒ false
     }
-
-  // Utilities to temporarily have unimplemented parts of the program
-  private def unimplementedFlow[A, B, C]: Flow[A, B, C] =
-    Flow.fromFunction[A, B](_ => ???).mapMaterializedValue(_ => ??? : C)
-
-  private def unimplementedSink[A, B]: Sink[A, B] = Sink.ignore.mapMaterializedValue(_ => ??? : B)
-
 }
 
 /**
@@ -182,7 +176,9 @@ class Server()(implicit executionContext: ExecutionContext, materializer: Materi
       * of the followers Map.
       */
     val incomingDataFlow: Flow[ByteString, (Event, Followers), NotUsed] =
-      unimplementedFlow
+      eventParserFlow
+        .via(reintroduceOrdering)
+        .via(followersFlow)
 
     // Wires the MergeHub and the BroadcastHub together and runs the graph
     MergeHub.source[ByteString](256)
@@ -206,7 +202,7 @@ class Server()(implicit executionContext: ExecutionContext, materializer: Materi
     * `Flow.fromSinkAndSourceCoupled` to find how to achieve that.
     */
   val eventsFlow: Flow[ByteString, Nothing, NotUsed] =
-    unimplementedFlow
+    Flow.fromSinkAndSourceCoupled[ByteString, Nothing](inboundSink, Source.maybe)
 
   /**
     * @return The source of events for the given user
@@ -221,7 +217,7 @@ class Server()(implicit executionContext: ExecutionContext, materializer: Materi
     *               Status Update:   All current followers of the From User ID should be notified
     */
   def outgoingFlow(userId: Int): Source[ByteString, NotUsed] =
-    ???
+    broadcastOut.filter(isNotified(userId)).map(_._1.render)
 
   /**
     * The "final form" of the client flow.
@@ -246,7 +242,13 @@ class Server()(implicit executionContext: ExecutionContext, materializer: Materi
 
     // A sink that parses the client identity and completes `clientIdPromise` with it
     val incoming: Sink[ByteString, NotUsed] =
-      ???
+      identityParserSink
+        .mapMaterializedValue {
+          mat ⇒
+            mat.onComplete(clientIdPromise.complete)
+            NotUsed
+        }
+
 
     val outgoing = Source.fromFutureSource(clientIdPromise.future.map { identity =>
       outgoingFlow(identity.userId)
