@@ -60,8 +60,7 @@ object Server {
     * (and have a look at `Keep.right`).
     */
   val identityParserSink: Sink[ByteString, Future[Identity]] =
-    Flow[ByteString]
-      .map(_.utf8String)
+    reframedFlow
       .map(Identity.parse)
       .toMat(Sink.head)(Keep.right)
 
@@ -141,7 +140,7 @@ object Server {
     eventAndFollowers match {
       case (_: Event.Broadcast, _) ⇒ true
       case (Event.PrivateMsg(_, _, to), _) ⇒ to == userId
-      case (Event.StatusUpdate(_, from), followers) ⇒ followers.get(from).exists(_.contains(userId))
+      case (Event.StatusUpdate(_, from), followers) ⇒ followers.get(userId).exists(_.contains(from))
       case _ ⇒ false
     }
 
