@@ -82,11 +82,7 @@ class FollowersSuite extends TestKit(ActorSystem("FollowersSuite"))
     val incoming = List(
       Event.Follow(2, 1, 2),
       Event.Follow(1, 1, 3),
-      Event.Follow(3, 1, 4),
-      Event.Follow(7, 1, 4),
-      Event.Follow(4, 1, 4),
-      Event.Follow(6, 1, 4),
-      Event.Follow(5, 1, 4)
+      Event.Follow(3, 1, 4)
     )
 
     val sorted = Source(incoming) via Server.reintroduceOrdering

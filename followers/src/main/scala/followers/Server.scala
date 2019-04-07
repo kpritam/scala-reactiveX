@@ -112,7 +112,23 @@ object Server {
     *  - you may find the `statefulMapConcat` operation useful.
     */
   val followersFlow: Flow[Event, (Event, Followers), NotUsed] =
-    unimplementedFlow
+    Flow[Event].statefulMapConcat { () ⇒
+      var followers: Followers = Map.empty
+
+      event ⇒
+        def updateFollowers(from: Int, op: Set[Int] ⇒ Set[Int]): Unit = {
+          val existingFollowers = followers.getOrElse(from, Set.empty)
+          followers = followers + (from → op(existingFollowers))
+        }
+
+        event match {
+          case Event.Follow(_, from, to) ⇒ updateFollowers(from, _.+(to))
+          case Event.Unfollow(_, from, to) ⇒ updateFollowers(from, _.-(to))
+          case _ ⇒ // ignore other event types
+        }
+
+        List((event, followers))
+    }
 
   /**
     * @return Whether the given user should be notified by the incoming `Event`,
@@ -122,7 +138,12 @@ object Server {
     * @param eventAndFollowers Event and current state of followers
     */
   def isNotified(userId: Int)(eventAndFollowers: (Event, Followers)): Boolean =
-    ???
+    eventAndFollowers match {
+      case (_: Event.Broadcast, _) ⇒ true
+      case (Event.PrivateMsg(_, _, to), _) ⇒ to == userId
+      case (Event.StatusUpdate(_, from), followers) ⇒ followers.get(from).exists(_.contains(userId))
+      case _ ⇒ false
+    }
 
   // Utilities to temporarily have unimplemented parts of the program
   private def unimplementedFlow[A, B, C]: Flow[A, B, C] =
